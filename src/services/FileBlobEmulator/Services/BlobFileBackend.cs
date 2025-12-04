@@ -68,7 +68,7 @@ public partial class BlobFileBackend
     {
         // For blob paths that may contain subdirectories (e.g., "folder/file.txt"),
         // sanitize each segment individually
-        var segments = blob.Split('/', '\\');
+        var segments = blob.Split(new[] { '/', '\\' }, StringSplitOptions.None);
         var safeSegments = segments.Select(SanitizePath).ToArray();
         var safeBlob = Path.Combine(safeSegments);
 

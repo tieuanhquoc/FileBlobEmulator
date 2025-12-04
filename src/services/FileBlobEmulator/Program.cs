@@ -17,10 +17,10 @@ Log.Logger = new LoggerConfiguration()
 builder.Services.AddSingleton<SharedKeyValidator>(_ =>
 {
     var account = Environment.GetEnvironmentVariable("BLOB_ACCOUNT_NAME")
-                  ?? throw new Exception("BLOB_ACCOUNT_NAME not set");
+                  ?? throw new InvalidOperationException("BLOB_ACCOUNT_NAME not set");
 
     var key = Environment.GetEnvironmentVariable("BLOB_ACCOUNT_KEY")
-              ?? throw new Exception("BLOB_ACCOUNT_KEY not set");
+              ?? throw new InvalidOperationException("BLOB_ACCOUNT_KEY not set");
 
     return new SharedKeyValidator(account, key);
 });
@@ -48,4 +48,4 @@ if (app.Environment.IsDevelopment())
 }
 
 app.UseHttpsRedirection();
-app.Run();
+await app.RunAsync();

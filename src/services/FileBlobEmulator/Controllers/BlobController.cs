@@ -19,6 +19,11 @@ public partial class BlobController : ControllerBase
     private const int MaxBlobNameLength = 1024;
     private const int MaxBlockIdLength = 64;
 
+    // Error messages
+    private const string ErrorInvalidPath = "Invalid path";
+    private const string LogPathTraversalAttempt = "Path traversal attempt: {Message}";
+    private const string ErrorAccessDenied = "Access denied";
+
     public BlobController(BlobFileBackend backend, ILogger<BlobController> logger)
     {
         _backend = backend;
@@ -85,7 +90,7 @@ public partial class BlobController : ControllerBase
 
         // Use SecurityElement.Escape for proper XML escaping
         // This escapes: < > & " '
-        return System.Security.SecurityElement.Escape(input) ?? string.Empty;
+        return System.Security.SecurityElement.Escape(input);
     }
 
     /// <summary>
@@ -104,7 +109,7 @@ public partial class BlobController : ControllerBase
     /// <summary>
     /// Validates all path parameters and returns BadRequest if invalid
     /// </summary>
-    private IActionResult? ValidatePathParameters(string account, string container, string? blobName = null)
+    private BadRequestObjectResult? ValidatePathParameters(string account, string container, string? blobName = null)
     {
         if (!IsValidAccountName(account))
             return BadRequest(new
@@ -135,6 +140,9 @@ public partial class BlobController : ControllerBase
 
     // PUT /{account}/{container}?restype=container
     [HttpPut]
+    [ProducesResponseType<int>(StatusCodes.Status201Created)]
+    [ProducesResponseType<int>(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType<int>(StatusCodes.Status403Forbidden)]
     public IActionResult CreateContainer(
         string account,
         string container,
@@ -156,12 +164,12 @@ public partial class BlobController : ControllerBase
         }
         catch (ArgumentException ex)
         {
-            return BadRequest(new { error = "Invalid path", details = ex.Message });
+            return BadRequest(new { error = ErrorInvalidPath, details = ex.Message });
         }
         catch (UnauthorizedAccessException ex)
         {
-            _logger.LogWarning("Path traversal attempt: {Message}", SanitizeForLog(ex.Message));
-            return StatusCode(403, new { error = "Access denied" });
+            _logger.LogWarning(ex, LogPathTraversalAttempt, SanitizeForLog(ex.Message));
+            return StatusCode(403, new { error = ErrorAccessDenied });
         }
     }
 
@@ -188,12 +196,12 @@ public partial class BlobController : ControllerBase
         }
         catch (ArgumentException ex)
         {
-            return BadRequest(new { error = "Invalid path", details = ex.Message });
+            return BadRequest(new { error = ErrorInvalidPath, details = ex.Message });
         }
         catch (UnauthorizedAccessException ex)
         {
-            _logger.LogWarning("Path traversal attempt: {Message}", SanitizeForLog(ex.Message));
-            return StatusCode(403, new { error = "Access denied" });
+            _logger.LogWarning(ex, LogPathTraversalAttempt, SanitizeForLog(ex.Message));
+            return StatusCode(403, new { error = ErrorAccessDenied });
         }
     }
 
@@ -239,12 +247,12 @@ public partial class BlobController : ControllerBase
         }
         catch (ArgumentException ex)
         {
-            return BadRequest(new { error = "Invalid path", details = ex.Message });
+            return BadRequest(new { error = ErrorInvalidPath, details = ex.Message });
         }
         catch (UnauthorizedAccessException ex)
         {
-            _logger.LogWarning("Path traversal attempt: {Message}", SanitizeForLog(ex.Message));
-            return StatusCode(403, new { error = "Access denied" });
+            _logger.LogWarning(ex, LogPathTraversalAttempt, SanitizeForLog(ex.Message));
+            return StatusCode(403, new { error = ErrorAccessDenied });
         }
     }
 
@@ -271,89 +279,26 @@ public partial class BlobController : ControllerBase
             // 1) PUT block
             if (string.Equals(comp, "block", StringComparison.OrdinalIgnoreCase))
             {
-                if (string.IsNullOrWhiteSpace(blockId))
-                    return BadRequest("Missing block id");
-
-                // Azure sends blockid as base64; decode to string for file name
-                string blockIdString;
-                try
-                {
-                    blockIdString = Encoding.UTF8.GetString(Convert.FromBase64String(blockId));
-                }
-                catch (FormatException)
-                {
-                    return BadRequest(new { error = "Invalid block id", details = "Block ID must be valid base64" });
-                }
-
-                if (!IsValidBlockId(blockIdString))
-                    return BadRequest(new
-                        { error = "Invalid block id", details = "Block ID contains invalid characters" });
-
-                _logger.LogInformation("PUT block: {A}/{C}/{B}, BlockId={Block}",
-                    SanitizeForLog(account), SanitizeForLog(container), SanitizeForLog(blobName),
-                    SanitizeForLog(blockIdString));
-
-                await _backend.SaveBlockAsync(account, container, blobName, blockIdString, Request.Body);
-                return Created(string.Empty, null);
+                return await PutBlockAsync(account, container, blobName, blockId);
             }
 
             // 2) PUT blocklist
             if (string.Equals(comp, "blocklist", StringComparison.OrdinalIgnoreCase))
             {
-                using var reader = new StreamReader(Request.Body);
-                var xmlText = await reader.ReadToEndAsync();
-
-                XElement xml;
-                try
-                {
-                    xml = XElement.Parse(xmlText);
-                }
-                catch (Exception)
-                {
-                    return BadRequest(new { error = "Invalid XML", details = "Block list must be valid XML" });
-                }
-
-                var blockIds = xml.Elements("Latest")
-                    .Select(x => x.Value)
-                    .ToList();
-
-                // Validate all block IDs
-                foreach (var id in blockIds)
-                {
-                    if (!IsValidBlockId(id))
-                        return BadRequest(new
-                        {
-                            error = "Invalid block id in list",
-                            details = $"Block ID '{SanitizeForLog(id)}' contains invalid characters"
-                        });
-                }
-
-                _logger.LogInformation("PUT blocklist: {A}/{C}/{B}, Count={Count}",
-                    SanitizeForLog(account), SanitizeForLog(container), SanitizeForLog(blobName), blockIds.Count);
-
-                await _backend.CommitBlocksAsync(account, container, blobName, blockIds);
-                return Created($"/{account}/{container}/{blobName}", null);
+                return await PutBlockListAsync(account, container, blobName);
             }
 
             // 3) PUT blob directly (single-shot)
-            _logger.LogInformation("PUT blob (single-shot): {A}/{C}/{B}",
-                SanitizeForLog(account), SanitizeForLog(container), SanitizeForLog(blobName));
-
-            const string singleBlockId = "_singleblock";
-
-            await _backend.SaveBlockAsync(account, container, blobName, singleBlockId, Request.Body);
-            await _backend.CommitBlocksAsync(account, container, blobName, new List<string> { singleBlockId });
-
-            return Created($"/{account}/{container}/{blobName}", null);
+            return await PutBlobDirectAsync(account, container, blobName);
         }
         catch (ArgumentException ex)
         {
-            return BadRequest(new { error = "Invalid path", details = ex.Message });
+            return BadRequest(new { error = ErrorInvalidPath, details = ex.Message });
         }
         catch (UnauthorizedAccessException ex)
         {
-            _logger.LogWarning("Path traversal attempt: {Message}", SanitizeForLog(ex.Message));
-            return StatusCode(403, new { error = "Access denied" });
+            _logger.LogWarning(ex, LogPathTraversalAttempt, SanitizeForLog(ex.Message));
+            return StatusCode(403, new { error = ErrorAccessDenied });
         }
     }
 
@@ -377,12 +322,12 @@ public partial class BlobController : ControllerBase
         }
         catch (ArgumentException ex)
         {
-            return BadRequest(new { error = "Invalid path", details = ex.Message });
+            return BadRequest(new { error = ErrorInvalidPath, details = ex.Message });
         }
         catch (UnauthorizedAccessException ex)
         {
-            _logger.LogWarning("Path traversal attempt: {Message}", SanitizeForLog(ex.Message));
-            return StatusCode(403, new { error = "Access denied" });
+            _logger.LogWarning(ex, LogPathTraversalAttempt, SanitizeForLog(ex.Message));
+            return StatusCode(403, new { error = ErrorAccessDenied });
         }
     }
 
@@ -403,12 +348,12 @@ public partial class BlobController : ControllerBase
         }
         catch (ArgumentException ex)
         {
-            return BadRequest(new { error = "Invalid path", details = ex.Message });
+            return BadRequest(new { error = ErrorInvalidPath, details = ex.Message });
         }
         catch (UnauthorizedAccessException ex)
         {
-            _logger.LogWarning("Path traversal attempt: {Message}", SanitizeForLog(ex.Message));
-            return StatusCode(403, new { error = "Access denied" });
+            _logger.LogWarning(ex, LogPathTraversalAttempt, SanitizeForLog(ex.Message));
+            return StatusCode(403, new { error = ErrorAccessDenied });
         }
     }
 
@@ -431,4 +376,81 @@ public partial class BlobController : ControllerBase
     // Matches newlines, carriage returns, tabs, and other control characters
     [GeneratedRegex(@"[\r\n\t\x00-\x1F\x7F]")]
     private static partial Regex LogSanitizeRegex();
+
+    private async Task<IActionResult> PutBlockAsync(string account, string container, string blobName, string? blockId)
+    {
+        if (string.IsNullOrWhiteSpace(blockId))
+            return BadRequest("Missing block id");
+
+        // Azure sends blockid as base64; decode to string for file name
+        string blockIdString;
+        try
+        {
+            blockIdString = Encoding.UTF8.GetString(Convert.FromBase64String(blockId));
+        }
+        catch (FormatException)
+        {
+            return BadRequest(new { error = "Invalid block id", details = "Block ID must be valid base64" });
+        }
+
+        if (!IsValidBlockId(blockIdString))
+            return BadRequest(new
+                { error = "Invalid block id", details = "Block ID contains invalid characters" });
+
+        _logger.LogInformation("PUT block: {A}/{C}/{B}, BlockId={Block}",
+            SanitizeForLog(account), SanitizeForLog(container), SanitizeForLog(blobName),
+            SanitizeForLog(blockIdString));
+
+        await _backend.SaveBlockAsync(account, container, blobName, blockIdString, Request.Body);
+        return Created(string.Empty, null);
+    }
+
+    private async Task<IActionResult> PutBlockListAsync(string account, string container, string blobName)
+    {
+        using var reader = new StreamReader(Request.Body);
+        var xmlText = await reader.ReadToEndAsync();
+
+        XElement xml;
+        try
+        {
+            xml = XElement.Parse(xmlText);
+        }
+        catch (Exception)
+        {
+            return BadRequest(new { error = "Invalid XML", details = "Block list must be valid XML" });
+        }
+
+        var blockIds = xml.Elements("Latest")
+            .Select(x => x.Value)
+            .ToList();
+
+        // Validate all block IDs
+        foreach (var id in blockIds.Where(id => !IsValidBlockId(id)))
+        {
+            return BadRequest(new
+            {
+                error = "Invalid block id in list",
+                details = $"Block ID '{SanitizeForLog(id)}' contains invalid characters"
+            });
+        }
+
+        _logger.LogInformation("PUT blocklist: {A}/{C}/{B}, Count={Count}",
+            SanitizeForLog(account), SanitizeForLog(container), SanitizeForLog(blobName), blockIds.Count);
+
+        await _backend.CommitBlocksAsync(account, container, blobName, blockIds);
+        return Created($"/{account}/{container}/{blobName}", null);
+    }
+
+    private async Task<IActionResult> PutBlobDirectAsync(string account, string container, string blobName)
+    {
+        _logger.LogInformation("PUT blob (single-shot): {A}/{C}/{B}",
+            SanitizeForLog(account), SanitizeForLog(container), SanitizeForLog(blobName));
+
+        const string singleBlockId = "_singleblock";
+
+        await _backend.SaveBlockAsync(account, container, blobName, singleBlockId, Request.Body);
+        await _backend.CommitBlocksAsync(account, container, blobName, new List<string> { singleBlockId });
+
+        return Created($"/{account}/{container}/{blobName}", null);
+    }
 }
