@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Xml.Linq;
 using FileBlobEmulator.Services;
 using Microsoft.AspNetCore.Mvc;
@@ -7,15 +8,100 @@ namespace FileBlobEmulator.Controllers;
 
 [ApiController]
 [Route("{account}/{container}")]
-public class BlobController : ControllerBase
+public partial class BlobController : ControllerBase
 {
     private readonly BlobFileBackend _backend;
     private readonly ILogger<BlobController> _logger;
+
+    // Maximum lengths for path segments
+    private const int MaxAccountLength = 64;
+    private const int MaxContainerLength = 63;
+    private const int MaxBlobNameLength = 1024;
+    private const int MaxBlockIdLength = 64;
 
     public BlobController(BlobFileBackend backend, ILogger<BlobController> logger)
     {
         _backend = backend;
         _logger = logger;
+    }
+
+    // ================================
+    // INPUT VALIDATION
+    // ================================
+
+    /// <summary>
+    /// Validates account name - must be alphanumeric lowercase, 3-64 chars
+    /// </summary>
+    private static bool IsValidAccountName(string? account)
+    {
+        if (string.IsNullOrWhiteSpace(account)) return false;
+        if (account.Length < 3 || account.Length > MaxAccountLength) return false;
+        return AccountNameRegex().IsMatch(account);
+    }
+
+    /// <summary>
+    /// Validates container name - alphanumeric lowercase + dash, 3-63 chars
+    /// </summary>
+    private static bool IsValidContainerName(string? container)
+    {
+        if (string.IsNullOrWhiteSpace(container)) return false;
+        if (container.Length < 3 || container.Length > MaxContainerLength) return false;
+        // Cannot start/end with dash, no consecutive dashes
+        if (container.StartsWith('-') || container.EndsWith('-')) return false;
+        if (container.Contains("--")) return false;
+        return ContainerNameRegex().IsMatch(container);
+    }
+
+    /// <summary>
+    /// Validates blob name - no path traversal, reasonable length
+    /// </summary>
+    private static bool IsValidBlobName(string? blobName)
+    {
+        if (string.IsNullOrWhiteSpace(blobName)) return false;
+        if (blobName.Length > MaxBlobNameLength) return false;
+        // Check for path traversal attempts
+        if (blobName.Contains("..")) return false;
+        if (blobName.StartsWith('/') || blobName.StartsWith('\\')) return false;
+        // Check for invalid characters
+        return BlobNameRegex().IsMatch(blobName);
+    }
+
+    /// <summary>
+    /// Validates block ID after base64 decode
+    /// </summary>
+    private static bool IsValidBlockId(string? blockId)
+    {
+        if (string.IsNullOrWhiteSpace(blockId)) return false;
+        if (blockId.Length > MaxBlockIdLength) return false;
+        return BlockIdRegex().IsMatch(blockId);
+    }
+
+    /// <summary>
+    /// Validates all path parameters and returns BadRequest if invalid
+    /// </summary>
+    private IActionResult? ValidatePathParameters(string account, string container, string? blobName = null)
+    {
+        if (!IsValidAccountName(account))
+            return BadRequest(new
+            {
+                error = "Invalid account name", details = "Account name must be 3-64 lowercase alphanumeric characters"
+            });
+
+        if (!IsValidContainerName(container))
+            return BadRequest(new
+            {
+                error = "Invalid container name",
+                details = "Container name must be 3-63 lowercase alphanumeric characters or dashes"
+            });
+
+        if (blobName != null && !IsValidBlobName(blobName))
+            return BadRequest(new
+            {
+                error = "Invalid blob name",
+                details = "Blob name contains invalid characters or path traversal attempts"
+            });
+
+        return null; // Valid
     }
 
     // ================================
@@ -32,10 +118,25 @@ public class BlobController : ControllerBase
         if (!string.Equals(restype, "container", StringComparison.OrdinalIgnoreCase))
             return BadRequest("Invalid restype");
 
+        var validationError = ValidatePathParameters(account, container);
+        if (validationError != null) return validationError;
+
         _logger.LogInformation("Create container {Account}/{Container}", account, container);
 
-        _backend.EnsureContainer(account, container);
-        return Created($"/{account}/{container}", null);
+        try
+        {
+            _backend.EnsureContainer(account, container);
+            return Created($"/{account}/{container}", null);
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(new { error = "Invalid path", details = ex.Message });
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            _logger.LogWarning("Path traversal attempt: {Message}", ex.Message);
+            return StatusCode(403, new { error = "Access denied" });
+        }
     }
 
     // DELETE /{account}/{container}?restype=container
@@ -48,15 +149,25 @@ public class BlobController : ControllerBase
         if (!string.Equals(restype, "container", StringComparison.OrdinalIgnoreCase))
             return BadRequest("Invalid restype");
 
+        var validationError = ValidatePathParameters(account, container);
+        if (validationError != null) return validationError;
+
         _logger.LogInformation("Delete container {Account}/{Container}", account, container);
 
-        var containerPath = Path.Combine("blob-data", account, container);
-        if (Directory.Exists(containerPath))
+        try
         {
-            Directory.Delete(containerPath, recursive: true);
+            _backend.DeleteContainer(account, container);
+            return Accepted();
         }
-
-        return Accepted();
+        catch (ArgumentException ex)
+        {
+            return BadRequest(new { error = "Invalid path", details = ex.Message });
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            _logger.LogWarning("Path traversal attempt: {Message}", ex.Message);
+            return StatusCode(403, new { error = "Access denied" });
+        }
     }
 
     // GET /{account}/{container}?restype=container&comp=list
@@ -73,19 +184,34 @@ public class BlobController : ControllerBase
             return BadRequest("Invalid query parameters");
         }
 
-        var blobs = _backend.ListBlobs(account, container).ToList();
+        var validationError = ValidatePathParameters(account, container);
+        if (validationError != null) return validationError;
 
-        var xml = new XElement("EnumerationResults",
-            new XAttribute("ContainerName", $"{account}/{container}"),
-            new XElement("Blobs",
-                blobs.Select(b => new XElement("Blob",
-                    new XElement("Name", b)
-                ))
-            ),
-            new XElement("NextMarker", "")
-        );
+        try
+        {
+            var blobs = _backend.ListBlobs(account, container).ToList();
 
-        return Content(xml.ToString(), "application/xml");
+            var xml = new XElement("EnumerationResults",
+                new XAttribute("ContainerName", $"{account}/{container}"),
+                new XElement("Blobs",
+                    blobs.Select(b => new XElement("Blob",
+                        new XElement("Name", b)
+                    ))
+                ),
+                new XElement("NextMarker", "")
+            );
+
+            return Content(xml.ToString(), "application/xml");
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(new { error = "Invalid path", details = ex.Message });
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            _logger.LogWarning("Path traversal attempt: {Message}", ex.Message);
+            return StatusCode(403, new { error = "Access denied" });
+        }
     }
 
     // ================================
@@ -103,51 +229,96 @@ public class BlobController : ControllerBase
         [FromQuery] string? comp,
         [FromQuery(Name = "blockid")] string? blockId)
     {
-        // 1) PUT block
-        if (string.Equals(comp, "block", StringComparison.OrdinalIgnoreCase))
+        var validationError = ValidatePathParameters(account, container, blobName);
+        if (validationError != null) return validationError;
+
+        try
         {
-            if (string.IsNullOrWhiteSpace(blockId))
-                return BadRequest("Missing block id");
+            // 1) PUT block
+            if (string.Equals(comp, "block", StringComparison.OrdinalIgnoreCase))
+            {
+                if (string.IsNullOrWhiteSpace(blockId))
+                    return BadRequest("Missing block id");
 
-            // Azure gửi blockid = base64; convert về string để dùng làm file name
-            var blockIdString = Encoding.UTF8.GetString(Convert.FromBase64String(blockId));
+                // Azure sends blockid as base64; decode to string for file name
+                string blockIdString;
+                try
+                {
+                    blockIdString = Encoding.UTF8.GetString(Convert.FromBase64String(blockId));
+                }
+                catch (FormatException)
+                {
+                    return BadRequest(new { error = "Invalid block id", details = "Block ID must be valid base64" });
+                }
 
-            _logger.LogInformation("PUT block: {A}/{C}/{B}, BlockId={Block}",
-                account, container, blobName, blockIdString);
+                if (!IsValidBlockId(blockIdString))
+                    return BadRequest(new
+                        { error = "Invalid block id", details = "Block ID contains invalid characters" });
 
-            await _backend.SaveBlockAsync(account, container, blobName, blockIdString, Request.Body);
-            return Created(string.Empty, null);
-        }
+                _logger.LogInformation("PUT block: {A}/{C}/{B}, BlockId={Block}",
+                    account, container, blobName, blockIdString);
 
-        // 2) PUT blocklist
-        if (string.Equals(comp, "blocklist", StringComparison.OrdinalIgnoreCase))
-        {
-            using var reader = new StreamReader(Request.Body);
-            var xmlText = await reader.ReadToEndAsync();
+                await _backend.SaveBlockAsync(account, container, blobName, blockIdString, Request.Body);
+                return Created(string.Empty, null);
+            }
 
-            var xml = XElement.Parse(xmlText);
-            var blockIds = xml.Elements("Latest")
-                              .Select(x => x.Value)
-                              .ToList();
+            // 2) PUT blocklist
+            if (string.Equals(comp, "blocklist", StringComparison.OrdinalIgnoreCase))
+            {
+                using var reader = new StreamReader(Request.Body);
+                var xmlText = await reader.ReadToEndAsync();
 
-            _logger.LogInformation("PUT blocklist: {A}/{C}/{B}, Count={Count}",
-                account, container, blobName, blockIds.Count);
+                XElement xml;
+                try
+                {
+                    xml = XElement.Parse(xmlText);
+                }
+                catch (Exception)
+                {
+                    return BadRequest(new { error = "Invalid XML", details = "Block list must be valid XML" });
+                }
 
-            await _backend.CommitBlocksAsync(account, container, blobName, blockIds);
+                var blockIds = xml.Elements("Latest")
+                    .Select(x => x.Value)
+                    .ToList();
+
+                // Validate all block IDs
+                foreach (var id in blockIds)
+                {
+                    if (!IsValidBlockId(id))
+                        return BadRequest(new
+                        {
+                            error = "Invalid block id in list", details = $"Block ID '{id}' contains invalid characters"
+                        });
+                }
+
+                _logger.LogInformation("PUT blocklist: {A}/{C}/{B}, Count={Count}",
+                    account, container, blobName, blockIds.Count);
+
+                await _backend.CommitBlocksAsync(account, container, blobName, blockIds);
+                return Created($"/{account}/{container}/{blobName}", null);
+            }
+
+            // 3) PUT blob directly (single-shot)
+            _logger.LogInformation("PUT blob (single-shot): {A}/{C}/{B}",
+                account, container, blobName);
+
+            const string singleBlockId = "_singleblock";
+
+            await _backend.SaveBlockAsync(account, container, blobName, singleBlockId, Request.Body);
+            await _backend.CommitBlocksAsync(account, container, blobName, new List<string> { singleBlockId });
+
             return Created($"/{account}/{container}/{blobName}", null);
         }
-
-        // 3) PUT blob trực tiếp (không block)
-        _logger.LogInformation("PUT blob (single-shot): {A}/{C}/{B}",
-            account, container, blobName);
-
-        // dùng 1 block giả, rồi commit như blocklist
-        const string singleBlockId = "_singleblock";
-
-        await _backend.SaveBlockAsync(account, container, blobName, singleBlockId, Request.Body);
-        await _backend.CommitBlocksAsync(account, container, blobName, new List<string> { singleBlockId });
-
-        return Created($"/{account}/{container}/{blobName}", null);
+        catch (ArgumentException ex)
+        {
+            return BadRequest(new { error = "Invalid path", details = ex.Message });
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            _logger.LogWarning("Path traversal attempt: {Message}", ex.Message);
+            return StatusCode(403, new { error = "Access denied" });
+        }
     }
 
     // GET /{account}/{container}/{blobName}
@@ -157,11 +328,26 @@ public class BlobController : ControllerBase
         string container,
         string blobName)
     {
-        var stream = _backend.GetBlob(account, container, blobName);
-        if (stream == null)
-            return NotFound();
+        var validationError = ValidatePathParameters(account, container, blobName);
+        if (validationError != null) return validationError;
 
-        return File(stream, "application/octet-stream", enableRangeProcessing: true);
+        try
+        {
+            var stream = _backend.GetBlob(account, container, blobName);
+            if (stream == null)
+                return NotFound();
+
+            return File(stream, "application/octet-stream", enableRangeProcessing: true);
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(new { error = "Invalid path", details = ex.Message });
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            _logger.LogWarning("Path traversal attempt: {Message}", ex.Message);
+            return StatusCode(403, new { error = "Access denied" });
+        }
     }
 
     // DELETE /{account}/{container}/{blobName}
@@ -171,7 +357,38 @@ public class BlobController : ControllerBase
         string container,
         string blobName)
     {
-        var ok = _backend.DeleteBlob(account, container, blobName);
-        return ok ? Accepted() : NotFound();
+        var validationError = ValidatePathParameters(account, container, blobName);
+        if (validationError != null) return validationError;
+
+        try
+        {
+            var ok = _backend.DeleteBlob(account, container, blobName);
+            return ok ? Accepted() : NotFound();
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(new { error = "Invalid path", details = ex.Message });
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            _logger.LogWarning("Path traversal attempt: {Message}", ex.Message);
+            return StatusCode(403, new { error = "Access denied" });
+        }
     }
+
+    // ================================
+    // REGEX PATTERNS (compiled)
+    // ================================
+
+    [GeneratedRegex(@"^[a-z0-9]+$")]
+    private static partial Regex AccountNameRegex();
+
+    [GeneratedRegex(@"^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]{3}$")]
+    private static partial Regex ContainerNameRegex();
+
+    [GeneratedRegex(@"^[a-zA-Z0-9\-_\.\/]+$")]
+    private static partial Regex BlobNameRegex();
+
+    [GeneratedRegex(@"^[a-zA-Z0-9\-_]+$")]
+    private static partial Regex BlockIdRegex();
 }
