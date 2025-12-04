@@ -425,12 +425,13 @@ public partial class BlobController : ControllerBase
             .ToList();
 
         // Validate all block IDs
-        foreach (var id in blockIds.Where(id => !IsValidBlockId(id)))
+        var invalidId = blockIds.FirstOrDefault(id => !IsValidBlockId(id));
+        if (invalidId != null)
         {
             return BadRequest(new
             {
                 error = "Invalid block id in list",
-                details = $"Block ID '{SanitizeForLog(id)}' contains invalid characters"
+                details = $"Block ID '{SanitizeForLog(invalidId)}' contains invalid characters"
             });
         }
 

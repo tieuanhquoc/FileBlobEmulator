@@ -2,6 +2,8 @@
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Vulnerabilities](https://sonarcloud.io/api/project_badges/measure?project=tieuanhquoc_FileBlobEmulator&metric=vulnerabilities)](https://sonarcloud.io/summary/new_code?id=tieuanhquoc_FileBlobEmulator)
+[![CodeQL Advanced](https://github.com/tieuanhquoc/FileBlobEmulator/actions/workflows/codeql.yml/badge.svg)](https://github.com/tieuanhquoc/FileBlobEmulator/actions/workflows/codeql.yml)
+
 
 
 A lightweight Azure Blob Storage emulator that stores blobs directly on the file system. Designed as a faster alternative to Azurite for local development and testing.
