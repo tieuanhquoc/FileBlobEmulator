@@ -77,6 +77,31 @@ public partial class BlobController : ControllerBase
     }
 
     /// <summary>
+    /// Sanitize string for safe XML output - prevents XSS attacks
+    /// </summary>
+    private static string SanitizeForXmlOutput(string input)
+    {
+        if (string.IsNullOrEmpty(input)) return string.Empty;
+
+        // Use SecurityElement.Escape for proper XML escaping
+        // This escapes: < > & " '
+        return System.Security.SecurityElement.Escape(input) ?? string.Empty;
+    }
+
+    /// <summary>
+    /// Sanitize string for safe logging - prevents Log Forging/Injection attacks
+    /// Removes newlines, carriage returns, and other control characters
+    /// </summary>
+    private static string SanitizeForLog(string? input)
+    {
+        if (string.IsNullOrEmpty(input)) return string.Empty;
+
+        // Remove newlines, carriage returns, tabs, and other control characters
+        // that could be used to forge log entries
+        return LogSanitizeRegex().Replace(input, "_");
+    }
+
+    /// <summary>
     /// Validates all path parameters and returns BadRequest if invalid
     /// </summary>
     private IActionResult? ValidatePathParameters(string account, string container, string? blobName = null)
@@ -121,7 +146,8 @@ public partial class BlobController : ControllerBase
         var validationError = ValidatePathParameters(account, container);
         if (validationError != null) return validationError;
 
-        _logger.LogInformation("Create container {Account}/{Container}", account, container);
+        _logger.LogInformation("Create container {Account}/{Container}", SanitizeForLog(account),
+            SanitizeForLog(container));
 
         try
         {
@@ -134,7 +160,7 @@ public partial class BlobController : ControllerBase
         }
         catch (UnauthorizedAccessException ex)
         {
-            _logger.LogWarning("Path traversal attempt: {Message}", ex.Message);
+            _logger.LogWarning("Path traversal attempt: {Message}", SanitizeForLog(ex.Message));
             return StatusCode(403, new { error = "Access denied" });
         }
     }
@@ -152,7 +178,8 @@ public partial class BlobController : ControllerBase
         var validationError = ValidatePathParameters(account, container);
         if (validationError != null) return validationError;
 
-        _logger.LogInformation("Delete container {Account}/{Container}", account, container);
+        _logger.LogInformation("Delete container {Account}/{Container}", SanitizeForLog(account),
+            SanitizeForLog(container));
 
         try
         {
@@ -165,7 +192,7 @@ public partial class BlobController : ControllerBase
         }
         catch (UnauthorizedAccessException ex)
         {
-            _logger.LogWarning("Path traversal attempt: {Message}", ex.Message);
+            _logger.LogWarning("Path traversal attempt: {Message}", SanitizeForLog(ex.Message));
             return StatusCode(403, new { error = "Access denied" });
         }
     }
@@ -191,17 +218,24 @@ public partial class BlobController : ControllerBase
         {
             var blobs = _backend.ListBlobs(account, container).ToList();
 
+            // Sanitize blob names to prevent XSS - only allow safe characters in output
+            var sanitizedBlobs = blobs.Select(b => SanitizeForXmlOutput(b)).ToList();
+
             var xml = new XElement("EnumerationResults",
-                new XAttribute("ContainerName", $"{account}/{container}"),
+                new XAttribute("ContainerName", $"{SanitizeForXmlOutput(account)}/{SanitizeForXmlOutput(container)}"),
                 new XElement("Blobs",
-                    blobs.Select(b => new XElement("Blob",
+                    sanitizedBlobs.Select(b => new XElement("Blob",
                         new XElement("Name", b)
                     ))
                 ),
                 new XElement("NextMarker", "")
             );
 
-            return Content(xml.ToString(), "application/xml");
+            // Set security headers to prevent content sniffing
+            Response.Headers.Append("X-Content-Type-Options", "nosniff");
+            Response.Headers.Append("X-XSS-Protection", "1; mode=block");
+
+            return Content(xml.ToString(), "application/xml; charset=utf-8");
         }
         catch (ArgumentException ex)
         {
@@ -209,7 +243,7 @@ public partial class BlobController : ControllerBase
         }
         catch (UnauthorizedAccessException ex)
         {
-            _logger.LogWarning("Path traversal attempt: {Message}", ex.Message);
+            _logger.LogWarning("Path traversal attempt: {Message}", SanitizeForLog(ex.Message));
             return StatusCode(403, new { error = "Access denied" });
         }
     }
@@ -256,7 +290,8 @@ public partial class BlobController : ControllerBase
                         { error = "Invalid block id", details = "Block ID contains invalid characters" });
 
                 _logger.LogInformation("PUT block: {A}/{C}/{B}, BlockId={Block}",
-                    account, container, blobName, blockIdString);
+                    SanitizeForLog(account), SanitizeForLog(container), SanitizeForLog(blobName),
+                    SanitizeForLog(blockIdString));
 
                 await _backend.SaveBlockAsync(account, container, blobName, blockIdString, Request.Body);
                 return Created(string.Empty, null);
@@ -288,12 +323,13 @@ public partial class BlobController : ControllerBase
                     if (!IsValidBlockId(id))
                         return BadRequest(new
                         {
-                            error = "Invalid block id in list", details = $"Block ID '{id}' contains invalid characters"
+                            error = "Invalid block id in list",
+                            details = $"Block ID '{SanitizeForLog(id)}' contains invalid characters"
                         });
                 }
 
                 _logger.LogInformation("PUT blocklist: {A}/{C}/{B}, Count={Count}",
-                    account, container, blobName, blockIds.Count);
+                    SanitizeForLog(account), SanitizeForLog(container), SanitizeForLog(blobName), blockIds.Count);
 
                 await _backend.CommitBlocksAsync(account, container, blobName, blockIds);
                 return Created($"/{account}/{container}/{blobName}", null);
@@ -301,7 +337,7 @@ public partial class BlobController : ControllerBase
 
             // 3) PUT blob directly (single-shot)
             _logger.LogInformation("PUT blob (single-shot): {A}/{C}/{B}",
-                account, container, blobName);
+                SanitizeForLog(account), SanitizeForLog(container), SanitizeForLog(blobName));
 
             const string singleBlockId = "_singleblock";
 
@@ -316,7 +352,7 @@ public partial class BlobController : ControllerBase
         }
         catch (UnauthorizedAccessException ex)
         {
-            _logger.LogWarning("Path traversal attempt: {Message}", ex.Message);
+            _logger.LogWarning("Path traversal attempt: {Message}", SanitizeForLog(ex.Message));
             return StatusCode(403, new { error = "Access denied" });
         }
     }
@@ -345,7 +381,7 @@ public partial class BlobController : ControllerBase
         }
         catch (UnauthorizedAccessException ex)
         {
-            _logger.LogWarning("Path traversal attempt: {Message}", ex.Message);
+            _logger.LogWarning("Path traversal attempt: {Message}", SanitizeForLog(ex.Message));
             return StatusCode(403, new { error = "Access denied" });
         }
     }
@@ -371,7 +407,7 @@ public partial class BlobController : ControllerBase
         }
         catch (UnauthorizedAccessException ex)
         {
-            _logger.LogWarning("Path traversal attempt: {Message}", ex.Message);
+            _logger.LogWarning("Path traversal attempt: {Message}", SanitizeForLog(ex.Message));
             return StatusCode(403, new { error = "Access denied" });
         }
     }
@@ -391,4 +427,8 @@ public partial class BlobController : ControllerBase
 
     [GeneratedRegex(@"^[a-zA-Z0-9\-_]+$")]
     private static partial Regex BlockIdRegex();
+
+    // Matches newlines, carriage returns, tabs, and other control characters
+    [GeneratedRegex(@"[\r\n\t\x00-\x1F\x7F]")]
+    private static partial Regex LogSanitizeRegex();
 }
