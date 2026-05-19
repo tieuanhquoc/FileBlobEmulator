@@ -162,7 +162,7 @@ public partial class BlobFileBackend
         return true;
     }
 
-    public IEnumerable<string> ListBlobs(string account, string container)
+    public IEnumerable<Models.BlobInfo> ListBlobs(string account, string container)
     {
         var path = C(account, container);
         if (!Directory.Exists(path)) yield break;
@@ -171,7 +171,15 @@ public partial class BlobFileBackend
         {
             // Skip block folders
             if (f.Contains(".blocks")) continue;
-            yield return Path.GetRelativePath(path, f);
+            
+            var info = new FileInfo(f);
+            var relativePath = Path.GetRelativePath(path, f).Replace('\\', '/');
+            
+            yield return new Models.BlobInfo(
+                relativePath,
+                info.Length,
+                new DateTimeOffset(info.LastWriteTimeUtc, TimeSpan.Zero)
+            );
         }
     }
 

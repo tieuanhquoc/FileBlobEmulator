@@ -227,14 +227,15 @@ public partial class BlobController : ControllerBase
         {
             var blobs = _backend.ListBlobs(account, container).ToList();
 
-            // Sanitize blob names to prevent XSS - only allow safe characters in output
-            var sanitizedBlobs = blobs.Select(b => SanitizeForXmlOutput(b)).ToList();
-
             var xml = new XElement("EnumerationResults",
                 new XAttribute("ContainerName", $"{SanitizeForXmlOutput(account)}/{SanitizeForXmlOutput(container)}"),
                 new XElement("Blobs",
-                    sanitizedBlobs.Select(b => new XElement("Blob",
-                        new XElement("Name", b)
+                    blobs.Select(b => new XElement("Blob",
+                        new XElement("Name", SanitizeForXmlOutput(b.Name)),
+                        new XElement("Properties",
+                            new XElement("Content-Length", b.Length),
+                            new XElement("Last-Modified", b.LastModified.ToString("R"))
+                        )
                     ))
                 ),
                 new XElement("NextMarker", "")
