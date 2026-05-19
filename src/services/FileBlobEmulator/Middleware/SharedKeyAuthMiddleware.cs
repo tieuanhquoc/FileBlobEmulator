@@ -26,9 +26,12 @@ public class SharedKeyAuthMiddleware
         if (!context.Request.Headers.TryGetValue("Authorization", out var authHeader))
         {
             await _next(context);
+
+
+            
             return;
         }
-
+           
         var auth = authHeader.ToString();
 
         // If it's a SharedKey request, validate the signature
