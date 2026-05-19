@@ -191,8 +191,8 @@ public partial class BlobController : ControllerBase
 
         try
         {
-            _backend.DeleteContainer(account, container);
-            return Accepted();
+            var deleted = _backend.DeleteContainer(account, container);
+            return deleted ? Accepted() : NotFound();
         }
         catch (ArgumentException ex)
         {
@@ -314,10 +314,15 @@ public partial class BlobController : ControllerBase
 
         try
         {
+            var size = _backend.GetBlobSize(account, container, blobName);
+            if (size == null)
+                return NotFound();
+
             var stream = _backend.GetBlob(account, container, blobName);
             if (stream == null)
                 return NotFound();
 
+            Response.Headers.ContentLength = size.Value;
             return File(stream, "application/octet-stream", enableRangeProcessing: true);
         }
         catch (ArgumentException ex)

@@ -32,4 +32,8 @@ ENV ASPNETCORE_URLS=http://+:8080
 ENV BLOB_ROOT=/app/blob-data
 ENV DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=false
 
+# Health check so Docker and orchestrators can monitor service liveness
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD wget -qO- http://localhost:8080/health || exit 1
+
 ENTRYPOINT ["dotnet", "FileBlobEmulator.dll"]

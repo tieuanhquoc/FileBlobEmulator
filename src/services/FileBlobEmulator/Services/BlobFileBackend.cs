@@ -89,13 +89,17 @@ public partial class BlobFileBackend
     public void EnsureContainer(string account, string container)
         => Directory.CreateDirectory(C(account, container));
 
-    public void DeleteContainer(string account, string container)
+    /// <summary>
+    /// Deletes a container and all its blobs. Returns false if the container does not exist.
+    /// </summary>
+    public bool DeleteContainer(string account, string container)
     {
         var containerPath = C(account, container);
-        if (Directory.Exists(containerPath))
-        {
-            Directory.Delete(containerPath, recursive: true);
-        }
+        if (!Directory.Exists(containerPath))
+            return false;
+
+        Directory.Delete(containerPath, recursive: true);
+        return true;
     }
 
     public async Task SaveBlockAsync(string account, string container, string blobName, string blockId, Stream data)
@@ -142,7 +146,19 @@ public partial class BlobFileBackend
     public Stream? GetBlob(string account, string container, string blobName)
     {
         var p = B(account, container, blobName);
-        return File.Exists(p) ? new FileStream(p, FileMode.Open, FileAccess.Read) : null;
+        if (!File.Exists(p)) return null;
+        // FileShare.Read allows multiple concurrent downloads of the same blob
+        return new FileStream(p, FileMode.Open, FileAccess.Read, FileShare.Read);
+    }
+
+    /// <summary>
+    /// Returns the size of a blob in bytes, or null if the blob does not exist.
+    /// </summary>
+    public long? GetBlobSize(string account, string container, string blobName)
+    {
+        var p = B(account, container, blobName);
+        if (!File.Exists(p)) return null;
+        return new FileInfo(p).Length;
     }
 
     public bool DeleteBlob(string account, string container, string blobName)
@@ -171,7 +187,11 @@ public partial class BlobFileBackend
         {
             // Skip block folders
             if (f.Contains(".blocks")) continue;
-            yield return Path.GetRelativePath(path, f);
+
+            // Normalize path separators to forward slashes for Azure SDK compatibility
+            // (Windows uses backslashes, but Azure Blob Storage paths always use '/')
+            var relativePath = Path.GetRelativePath(path, f);
+            yield return relativePath.Replace(Path.DirectorySeparatorChar, '/');
         }
     }
 

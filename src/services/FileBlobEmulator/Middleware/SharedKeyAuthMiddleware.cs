@@ -13,9 +13,10 @@ public class SharedKeyAuthMiddleware
 
     public async Task InvokeAsync(HttpContext context, SharedKeyValidator validator)
     {
-        // Skip auth for Swagger/OpenAPI endpoints
+        // Skip auth for Swagger/OpenAPI endpoints and health probe
         if (context.Request.Path.StartsWithSegments("/swagger") ||
-            context.Request.Path.StartsWithSegments("/openapi"))
+            context.Request.Path.StartsWithSegments("/openapi") ||
+            context.Request.Path.Equals("/health", StringComparison.OrdinalIgnoreCase))
         {
             await _next(context);
             return;

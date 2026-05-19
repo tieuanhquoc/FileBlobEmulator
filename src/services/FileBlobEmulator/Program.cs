@@ -27,7 +27,9 @@ builder.Services.AddSingleton<SharedKeyValidator>(_ =>
 
 
 builder.Services.AddScoped<SharedKeyAuthFilter>();
-builder.Services.AddScoped<BlobFileBackend>();
+// BlobFileBackend is stateless (no per-request state) so Singleton is correct and avoids
+// redundant object allocations and repeated root-directory creation checks.
+builder.Services.AddSingleton<BlobFileBackend>();
 
 builder.Host.UseSerilog();
 builder.Services.AddSwaggerGen();
@@ -40,6 +42,9 @@ app.UseMiddleware<SharedKeyAuthMiddleware>();
 app.UseSerilogRequestLogging();
 app.UseRouting();
 app.MapControllers();
+// Health check endpoint — used by Docker HEALTHCHECK and Kubernetes liveness probes.
+// Authentication is skipped for this path (see SharedKeyAuthMiddleware and SharedKeyAuthFilter).
+app.MapGet("/health", () => Results.Ok(new { status = "healthy", timestamp = DateTime.UtcNow }));
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
