@@ -21,11 +21,9 @@ public class SharedKeyAuthMiddleware
             return;
         }
 
-        // If no Authorization header, allow request (for backwards compatibility)
-        // You may want to change this to require auth in production
         if (!context.Request.Headers.TryGetValue("Authorization", out var authHeader))
         {
-            await _next(context);
+            await RejectAsync(context);
             return;
         }
 
@@ -46,7 +44,12 @@ public class SharedKeyAuthMiddleware
             return;
         }
 
-        // For other auth schemes, continue (could add Bearer token support here)
-        await _next(context);
+        await RejectAsync(context);
+    }
+
+    private static async Task RejectAsync(HttpContext context)
+    {
+        context.Response.StatusCode = StatusCodes.Status403Forbidden;
+        await context.Response.WriteAsync("Authentication failed: SharedKey authorization is required.");
     }
 }
