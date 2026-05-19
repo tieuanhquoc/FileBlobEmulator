@@ -1,51 +1,91 @@
 using FileBlobEmulator.Middleware;
 using FileBlobEmulator.Services;
 using Serilog;
+using Serilog.Formatting.Compact;
 
 var builder = WebApplication.CreateBuilder(args);
 
-Log.Logger = new LoggerConfiguration()
-    .WriteTo.Console()
-    .WriteTo.File(
-        path: "logs/blobserver-.log",
-        rollingInterval: RollingInterval.Day,
-        formatter: new Serilog.Formatting.Compact.CompactJsonFormatter()
-    )
-    .MinimumLevel.Information()
-    .CreateLogger();
+#region Serilog
 
-builder.Services.AddSingleton<SharedKeyValidator>(_ =>
+builder.Host.UseSerilog((context, services, configuration) =>
 {
-    var account = Environment.GetEnvironmentVariable("BLOB_ACCOUNT_NAME")
-                  ?? throw new InvalidOperationException("BLOB_ACCOUNT_NAME not set");
-
-    var key = Environment.GetEnvironmentVariable("BLOB_ACCOUNT_KEY")
-              ?? throw new InvalidOperationException("BLOB_ACCOUNT_KEY not set");
-
-    return new SharedKeyValidator(account, key);
+    configuration
+        .ReadFrom.Configuration(context.Configuration)
+        .Enrich.FromLogContext()
+        .WriteTo.Console()
+        .WriteTo.File(
+            formatter: new CompactJsonFormatter(),
+            path: "logs/blobserver-.log",
+            rollingInterval: RollingInterval.Day,
+            retainedFileCountLimit: 14
+        );
 });
 
+#endregion
+
+#region Environment Variables
+
+var accountName = Environment.GetEnvironmentVariable("BLOB_ACCOUNT_NAME")
+                  ?? throw new InvalidOperationException("BLOB_ACCOUNT_NAME not set");
+
+var accountKey = Environment.GetEnvironmentVariable("BLOB_ACCOUNT_KEY")
+                 ?? throw new InvalidOperationException("BLOB_ACCOUNT_KEY not set");
+
+#endregion
+
+#region Services
+
+builder.Services.AddSingleton(new SharedKeyValidator(accountName, accountKey));
 
 builder.Services.AddScoped<SharedKeyAuthFilter>();
 builder.Services.AddScoped<BlobFileBackend>();
 
-builder.Host.UseSerilog();
-builder.Services.AddSwaggerGen();
 builder.Services.AddControllers();
-builder.Services.AddOpenApi();
-builder.Services.AddRouting(option => option.LowercaseUrls = true);
+
+builder.Services.AddRouting(options =>
+{
+    options.LowercaseUrls = true;
+});
+
+builder.Services.AddEndpointsApiExplorer();
+
+builder.Services.AddSwaggerGen();
+
+#endregion
 
 var app = builder.Build();
-app.UseMiddleware<SharedKeyAuthMiddleware>();
+
+#region Middleware Pipeline
+
 app.UseSerilogRequestLogging();
+
 app.UseRouting();
-app.MapControllers();
+
+app.UseMiddleware<SharedKeyAuthMiddleware>();
+
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
-    app.MapOpenApi();
     app.UseSwaggerUI();
 }
 
 app.UseHttpsRedirection();
-await app.RunAsync();
+
+app.MapControllers();
+
+#endregion
+
+try
+{
+    Log.Information("Starting Blob Emulator API");
+
+    await app.RunAsync();
+}
+catch (Exception ex)
+{
+    Log.Fatal(ex, "Application terminated unexpectedly");
+}
+finally
+{
+    await Log.CloseAndFlushAsync();
+}
